@@ -175,7 +175,7 @@ module OData
 
         Rails.logger.info "Segments from odata context field: #{segments.inspect}"
 
-        first_entity_type = get_type_by_name("Collection(#{entity_set_by_name(segments.shift).member_type})")
+        first_entity_type = get_type_by_name("Collection(#{entity_set_by_name(segments.shift)&.member_type})")
         entity_type = segments.reduce(first_entity_type) do |last_entity_type, segment|
           last_entity_type.member_type.navigation_property_by_name(segment).type
         end
