@@ -1,9 +1,16 @@
 class MicrosoftGraph
   class ClassBuilder
     @@loaded = false
+    LOAD_LOCK = Mutex.new
 
     def self.load!(service)
-      if !@@loaded
+      return if @@loaded
+
+      # Without the lock, a second thread creating its first graph would redefine
+      # every class while the first thread is still building or using them.
+      LOAD_LOCK.synchronize do
+        return if @@loaded
+
         @service_namespace = service.namespace
         service.entity_types.each do |entity_type|
           create_class! entity_type
@@ -41,14 +48,12 @@ class MicrosoftGraph
           end
         end
 
+        navigation_properties = (service.entity_sets + service.singletons).map { |navigation_property|
+          [navigation_property.name.to_sym, navigation_property]
+        }.to_h.freeze
+
         MicrosoftGraph.instance_eval do
-          define_method(:navigation_properties) do
-            service.entity_sets
-              .concat(service.singletons)
-              .map { |navigation_property|
-                [navigation_property.name.to_sym, navigation_property]
-              }.to_h
-          end
+          define_method(:navigation_properties) { navigation_properties }
         end
 
         @@loaded = true
