@@ -10,6 +10,7 @@ describe MicrosoftGraph::ClassBuilder do
       describe "class" do
         Then { defined?(MicrosoftGraph::User) }
         Then { MicrosoftGraph::User.superclass == MicrosoftGraph::DirectoryObject }
+
         context "will tell you the odata type that defined it" do
           Then { OData::EntityType === MicrosoftGraph::User.odata_type }
           Then { MicrosoftGraph::User.odata_type.name == "microsoft.graph.user" }
@@ -19,6 +20,7 @@ describe MicrosoftGraph::ClassBuilder do
         When(:subject) { MicrosoftGraph::User.new }
         Then { subject.properties.length == 42 }
         Then { subject.respond_to?(:given_name) }
+
         context "inherits the id property" do
           Then { subject.respond_to?(:id) }
           Then { subject.id.nil? }
@@ -35,7 +37,85 @@ describe MicrosoftGraph::ClassBuilder do
     end
   end
 
+  describe ".load! before anything is loaded" do
+    let(:service) { OData::Service.new(base_url: "https://graph.microsoft.com/v1.0/", namespace: "microsoft.graph", metadata_file: File.join(MicrosoftGraph::CACHED_METADATA_DIRECTORY, "metadata_v1.0.xml")) }
+
+    it "builds the classes once when several threads create their first graph" do
+      created, expected = in_forked_process do
+        MicrosoftGraph::ClassBuilder.class_variable_set(:@@loaded, false)
+        created = Queue.new
+
+        MicrosoftGraph::ClassBuilder.singleton_class.prepend(Module.new do
+          define_method(:create_class!) do |type|
+            # Pause the first load so the other thread starts its own
+            sleep(0.1) if created.empty?
+
+            created << type.name
+            super(type)
+          end
+        end)
+
+        2.times.map { Thread.new { MicrosoftGraph::ClassBuilder.load!(service) } }.each(&:join)
+
+        [created.size, service.entity_types.size + service.complex_types.size]
+      end
+
+      expect(created).to eq(expected)
+    end
+
+    it "doesn't add to the service's entity sets each time navigation properties are read" do
+      before_count, after_count, keys = in_forked_process do
+        MicrosoftGraph::ClassBuilder.class_variable_set(:@@loaded, false)
+        MicrosoftGraph::ClassBuilder.load!(service)
+
+        graph = MicrosoftGraph.new(cached_metadata_file: File.join(MicrosoftGraph::CACHED_METADATA_DIRECTORY, "metadata_v1.0.xml"))
+        entity_set_count = service.entity_sets.size
+        2.times { graph.navigation_properties }
+
+        [entity_set_count, service.entity_sets.size, graph.navigation_properties.keys]
+      end
+
+      expect(after_count).to eq(before_count)
+      expect(keys).to include(:users, :me)
+    end
+  end
+
   it 'has a version number' do
     expect(MicrosoftGraph::VERSION).not_to be nil
+  end
+
+  private
+
+  # These examples reload every class from scratch. Doing that in the shared test process would replace
+  # MicrosoftGraph::User and the rest under other specs. Each runs in a forked child process to avoid that.
+  def in_forked_process
+    reader, writer = IO.pipe
+
+    pid = fork do
+      reader.close
+
+      # The child redefines every class on purpose so its "already initialized constant" warnings are noise
+      $VERBOSE = nil
+
+      result = begin
+        yield
+      rescue Exception => error # rubocop:disable Lint/RescueException
+        error
+      end
+
+      writer.write(Marshal.dump(result))
+      writer.close
+
+      # Skip at_exit hooks (RSpec, SimpleCov) inherited from the parent
+      exit!(0)
+    end
+
+    writer.close
+    result = Marshal.load(reader.read)
+
+    Process.wait(pid)
+    raise result if result.is_a?(Exception)
+
+    result
   end
 end
